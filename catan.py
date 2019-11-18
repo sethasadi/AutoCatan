@@ -1,4 +1,6 @@
 import cv2
+import numpy as np
+import copy
 
 
 surf = cv2.xfeatures2d.SURF_create(hessianThreshold=400, nOctaves=4,
@@ -18,9 +20,26 @@ resource_dict = {}
 for i, resource in enumerate(resources):
     resource_dict[i] = resource
 
-frame_rate = 10
+frame_rate = 5
 
 static_distributions = []
+
+ip_stream_1 = '10.0.0.60'
+ip_stream_2 = '10.0.0.93'
+
+board_low = [80, 20, 100]
+board_high = [220, 255, 255]
+dir = 1
+
+display_index = 0
+
+gameboard = None
+
+model_coords = []
+
+game_model = np.float32([[5.75, 0], [16.25, 0], [21, 9.1], [16.25, 18.2], [5.75, 18.2], [0, 9.1]])
+game_model = np.multiply(game_model, 500/float(21))
+
 
 # key codes:
 # Shift: 0
@@ -127,36 +146,180 @@ def l2_norm(list_1, list_2):
     return sum((p-q)**2 for p, q in zip(list_1, list_2)) ** .5
 
 
-if __name__ == "__main__":
-    ip_stream_1 = '10.0.0.60'
-    ip_stream_2 = '10.0.0.93'
+def determine_resource(image, l2_thresh=0.5):
+    dists = []
+    for resource_feature in resource_features:
+        good = find_good_matches(features_1=resource_feature, image_2=image)
+        dists.append(len(good))
+    l2_thresh = 0.5
+    best_resource = None
+    if sum(dists) != 0:
+        dists = normalize(dists)
+        for resource_name, dist in zip(resources, static_distributions):
+            l2 = l2_norm(dists, dist)
+            if l2 < l2_thresh:
+                l2_thresh = l2
+                best_resource = resource_name
+    return best_resource
 
-    stream_1 = cv2.VideoCapture()
-    stream_2 = cv2.VideoCapture()
 
-    stream_1.open(f'http://{ip_stream_1}/live')
-    stream_2.open(f'http://{ip_stream_2}/live')
+def open_stream(ip):
+    stream = cv2.VideoCapture()
+    stream.open(f'http://{ip}/live')
+    return stream
+
+
+def approx_hexagon(corner_points):
+    num_corners = len(corner_points)
+    lengths = []
+    for side in range(num_corners):
+        x1, y1 = tuple(corner_points[side][0])
+        x2, y2 = tuple(corner_points[(side + 1) % num_corners][0])
+        lengths.append(((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5)
+    lengths = normalize(lengths)
+    return l2_norm(lengths, [1/float(num_corners)]*num_corners)
+
+
+def handle_key(key, stream):
+    global dir
+    global display_index
+    global frame_rate
+    if key == 27:
+        exit(0)
+    elif key == ord('q'):
+        board_high[0] = min(board_high[0] + (5 * dir), 255)
+    elif key == ord('w'):
+        board_high[1] = min(board_high[1] + (5 * dir), 255)
+    elif key == ord('e'):
+        board_high[2] = min(board_high[2] + (5 * dir), 255)
+    elif key == ord('a'):
+        board_low[0] = max(board_low[0] - (5 * dir), 0)
+    elif key == ord('s'):
+        board_low[1] = max(board_low[1] - (5 * dir), 0)
+    elif key == ord('d'):
+        board_low[2] = max(board_low[2] - (5 * dir), 0)
+    elif key == 0:
+        dir *= -1
+    elif key == 32:
+        display_index = (display_index + 1) % 4
+    elif key == 91:
+        frame_rate = max(frame_rate - 1, 1)
+    elif key == 93:
+        frame_rate = frame_rate + 1
+    elif key == ord('r'):
+        find_gameboard(stream)
+
+
+def show_view(rgb=None, hue=None, saturation=None, value=None):
+    to_display = []
+    if rgb is not None:
+        to_display.append(rgb)
+    if hue is not None:
+        to_display.append(hue)
+    if saturation is not None:
+        to_display.append(saturation)
+    if value is not None:
+        to_display.append(value)
+    cv2.imshow('Display', to_display[display_index % len(to_display)])
+
+
+def find_gameboard(stream):
+    global gameboard
+    confirmed = 0
     frame_number = 0
-
-    calculate_static_distributions()
-
-    while cv2.waitKey(33) != 27:
-        _, frame = stream_1.read()
+    approx = None
+    while confirmed < 5:
+        stream.grab()
         frame_number += 1
         if frame_number % frame_rate != 0:
             continue
-        cv2.imshow('Working', frame)
-        dists = []
-        for resource_feature in resource_features:
-            good = find_good_matches(features_1=resource_feature, image_2=frame)
-            dists.append(len(good))
-        max_l2 = 0.5
-        best_resource = None
-        if sum(dists) != 0:
-            dists = normalize(dists)
-            for resource_name, dist in zip(resources, static_distributions):
-                l2 = l2_norm(dists, dist)
-                if l2 < max_l2:
-                    max_l2 = l2
-                    best_resource = resource_name
-        print(best_resource)
+        _, frame = stream.retrieve()
+        image_HSV = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        hue, saturation, value = list(cv2.split(image_HSV))
+
+        _, hue_thresh_low = cv2.threshold(hue, board_low[0], 255, cv2.THRESH_BINARY)
+        _, hue_thresh_high = cv2.threshold(hue, board_high[0], 255, cv2.THRESH_BINARY_INV)
+        hue_thresh_combined = cv2.bitwise_and(hue_thresh_low, hue_thresh_high)
+
+        _, saturation_thresh_low = cv2.threshold(saturation, board_low[1], 255, cv2.THRESH_BINARY)
+        _, saturation_thresh_high = cv2.threshold(saturation, board_high[1], 255, cv2.THRESH_BINARY_INV)
+        saturation_thresh_combined = cv2.bitwise_and(saturation_thresh_low, saturation_thresh_high)
+
+        _, value_thresh_low = cv2.threshold(value, board_low[2], 255, cv2.THRESH_BINARY)
+        _, value_thresh_high = cv2.threshold(value, board_high[2], 255, cv2.THRESH_BINARY_INV)
+        value_thresh_combined = cv2.bitwise_and(value_thresh_low, value_thresh_high)
+
+        img_result = cv2.bitwise_and(cv2.bitwise_and(hue_thresh_combined, saturation_thresh_combined), value_thresh_combined)
+
+        kernel = np.ones((3, 3), np.uint8)
+        img_result = cv2.morphologyEx(img_result, cv2.MORPH_CLOSE, kernel)
+        img_result = cv2.morphologyEx(img_result, cv2.MORPH_OPEN, kernel)
+
+        contours, hierachy = cv2.findContours(img_result, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)[-2:]
+        if hierachy is None:
+            continue
+        for c, h in zip(contours, hierachy[0]):
+            size = cv2.contourArea(c)
+            if size > 40000 and h[3] == -1:
+                epsilon = 0.03 * cv2.arcLength(c, True)
+                approx = cv2.approxPolyDP(c, epsilon, True)
+                corners = len(approx)
+                hex_approx = approx_hexagon(approx)
+
+                M_actual = cv2.moments(c)
+                centroid_actual = [int(M_actual["m10"] / M_actual["m00"]), int(M_actual["m01"] / M_actual["m00"])]
+                M_hex = cv2.moments(approx)
+                centroid_hex = [int(M_hex["m10"] / M_hex["m00"]), int(M_hex["m01"] / M_hex["m00"])]
+                distance = ((centroid_actual[0] - centroid_hex[0]) ** 2 + (centroid_actual[1] - centroid_hex[1]) ** 2) ** 0.5
+                if corners == 6 and hex_approx < 0.1 and distance < 5:
+                    # cv2.drawContours(frame, [approx], -1, (10, 255, 0), 4)
+                    confirmed += 1
+                else:
+                    # cv2.drawContours(frame, [approx], -1, (0, 0, 255), 4)
+                    pass
+    print("Gameboard Identified")
+    gameboard = approx
+
+
+def get_orthophoto(frame):
+    hex = np.zeros((6, 2), dtype=np.float32)
+    for i, corner in enumerate(gameboard):
+        hex[i] = corner[0]
+    H, _ = cv2.findHomography(hex, game_model, cv2.RANSAC, 5.0)
+    return cv2.warpPerspective(frame, H, (500, 434))
+
+
+def draw_gameboard(frame):
+    return cv2.drawContours(copy.copy(frame), [gameboard], -1, (10, 255, 0), 4)
+
+
+def get_frame(stream, frame_number):
+    frame = None
+    stream.grab()
+    if frame_number % frame_rate == 0:
+        _, frame = stream.retrieve()
+    return frame
+
+
+if __name__ == "__main__":
+    frame_number = 0
+
+    stream = open_stream(ip_stream_1)
+    calculate_static_distributions()
+    if gameboard is None:
+        find_gameboard(stream)
+
+    while True:
+        key = cv2.waitKey(33)
+        handle_key(key, stream)
+        frame = get_frame(stream, frame_number)
+        frame_number += 1
+        if frame is None:
+            continue
+
+        ortho = get_orthophoto(frame)
+        cv2.imshow('Ortho', ortho)
+
+        # board = draw_gameboard(frame)
+        # show_view(rgb=board)
+        # resource = determine_resource(frame)
