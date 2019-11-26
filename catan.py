@@ -324,7 +324,7 @@ def get_frame(stream, frame_number):
     return frame
 
 
-def get_tile_coordinates():
+def get_tile_coordinates(tile_width):
     '''Return the coordinates of the corners of all of the tiles
 
        Should be of size n x 6 x 2 where the first dimension is the tiles,
@@ -333,7 +333,70 @@ def get_tile_coordinates():
        Order of the coords should be UL, UR, MR, LR, LL, ML'''
     tile_count = 19
     tile_coords = np.zeros((tile_count, 6, 2))
+
+    center = (0, 0) + ortho_image_center
+
+    tiles = {}
+    tiles[center] = corners_from_center(center, tile_width)
+    for first_surround in surrounding_tiles(center, tile_width):
+        tiles[first_surround] = corners_from_center(first_surround, tile_width)
+        for second_surround in surrounding_tiles(first_surround, tile_width):
+            if second_surround in tiles.keys():
+                continue
+            tiles[second_surround] = corners_from_center(second_surround,
+                                                         tile_width)
+
+    assert len(tiles.keys()) == tile_count
+
+    for i, tile in enumerate(tiles.keys()):
+        for j, point in enumerate(tiles[tile]):
+            for k, coord in enumerate(point):
+                tile_coords[i, j, k] = coord
+
+
     return tile_coords
+
+
+def corners_from_center(center, tile_width=1):
+    """Returns the coordinates of all corners relative to a given center
+    coordinate
+
+    Order of the coords should be UL, U, UR, LR, L, LL
+    """
+
+    horizontal = ((3 ** 0.5) / 2.0) * tile_width
+    vertical = tile_width
+    half_vertical = tile_width / 2.0
+
+    points = []
+    points.append((-1 * horizontal, -1 * half_vertical))
+    points.append((0.0, -1 * vertical))
+    points.append((horizontal, -1 * half_vertical))
+    points.append((horizontal, half_vertical))
+    points.append((0.0, vertical))
+    points.append((-1 * horizontal, half_vertical))
+
+    return list(filter(lambda p: round(p + center), points))
+
+
+def surrounding_tiles(center, tile_width=1):
+    """Gets coordinates of centers of all surrounding tiles given the center
+    of a tile
+    """
+
+    horizontal = (3 ** 0.5) * tile_width
+    half_horizontal = horizontal / 2.0
+    vertical = 1.5 * tile_width
+
+    points = []
+    points.append((-1 * half_horizontal, -1 * vertical))
+    points.append((half_horizontal, -1 * vertical))
+    points.append((horizontal, 0.0))
+    points.append((half_horizontal, vertical))
+    points.append((-1 * half_horizontal, vertical))
+    points.append((-1 * horizontal, 0.0))
+
+    return list(filter(lambda p: round(p + center), points))
 
 
 def get_search_area(tile):

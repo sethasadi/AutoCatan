@@ -12,5 +12,6 @@ class Tile:
         self.tile_ortho = tile_ortho
 
     def disperse(self):
-        '''Go through cities and settlements and disperse this resource to
-           them'''
+        '''Go through cities and settlements and disperse this resource
+        to them
+        '''
