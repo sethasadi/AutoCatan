@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import copy
+from tile import Tile
 
 
 surf = cv2.xfeatures2d.SURF_create(hessianThreshold=400, nOctaves=4,
@@ -37,8 +38,14 @@ gameboard = None
 
 model_coords = []
 
-game_model = np.float32([[5.75, 0], [16.25, 0], [21, 9.1], [16.25, 18.2], [5.75, 18.2], [0, 9.1]])
-game_model = np.multiply(game_model, 500/float(21))
+ortho_width = 500
+ortho_height = int(0.867 * ortho_width)
+ortho_image_center = ortho_width // 2, ortho_height // 2
+print(ortho_image_center)
+
+game_model = np.float32([[5.75, 0], [16.25, 0], [21, 9.1], [16.25, 18.2],
+                         [5.75, 18.2], [0, 9.1]])
+game_model = np.multiply(game_model, ortho_width/float(21))
 
 
 # key codes:
@@ -52,7 +59,8 @@ game_model = np.multiply(game_model, 500/float(21))
 # 0-9: 48-57
 
 
-def find_good_matches(image_1=None, image_2=None, features_1=None, features_2=None):
+def find_good_matches(image_1=None, image_2=None, features_1=None,
+                      features_2=None):
     if features_1 is None:
         features_1 = surf.detectAndCompute(image_1, None)
     if features_2 is None:
@@ -113,7 +121,8 @@ def view_resource_templates():
             else:
                 features_showing = True
                 kp, des = surf.detectAndCompute(resource, None)
-                features = cv2.drawKeypoints(resource, kp, None, (255, 0, 0), 4)
+                features = cv2.drawKeypoints(resource, kp, None, (255, 0, 0),
+                                             4)
         if features_showing and features is not None:
             cv2.imshow(window, features)
         elif resource is not None:
@@ -128,7 +137,8 @@ def calculate_static_distributions():
     for features_main in resource_features:
         dists = []
         for features_other in resource_features:
-            good = find_good_matches(features_1=features_main, features_2=features_other)
+            good = find_good_matches(features_1=features_main,
+                                     features_2=features_other)
             dists.append(len(good))
         dists = normalize(dists)
         static_distributions.append(dists)
@@ -237,25 +247,36 @@ def find_gameboard(stream):
         image_HSV = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         hue, saturation, value = list(cv2.split(image_HSV))
 
-        _, hue_thresh_low = cv2.threshold(hue, board_low[0], 255, cv2.THRESH_BINARY)
-        _, hue_thresh_high = cv2.threshold(hue, board_high[0], 255, cv2.THRESH_BINARY_INV)
+        _, hue_thresh_low = cv2.threshold(hue, board_low[0], 255,
+                                          cv2.THRESH_BINARY)
+        _, hue_thresh_high = cv2.threshold(hue, board_high[0], 255,
+                                           cv2.THRESH_BINARY_INV)
         hue_thresh_combined = cv2.bitwise_and(hue_thresh_low, hue_thresh_high)
 
-        _, saturation_thresh_low = cv2.threshold(saturation, board_low[1], 255, cv2.THRESH_BINARY)
-        _, saturation_thresh_high = cv2.threshold(saturation, board_high[1], 255, cv2.THRESH_BINARY_INV)
-        saturation_thresh_combined = cv2.bitwise_and(saturation_thresh_low, saturation_thresh_high)
+        _, saturation_thresh_low = cv2.threshold(saturation, board_low[1], 255,
+                                                 cv2.THRESH_BINARY)
+        _, saturation_thresh_high = cv2.threshold(saturation, board_high[1],
+                                                  255, cv2.THRESH_BINARY_INV)
+        saturation_thresh_combined = cv2.bitwise_and(saturation_thresh_low,
+                                                     saturation_thresh_high)
 
-        _, value_thresh_low = cv2.threshold(value, board_low[2], 255, cv2.THRESH_BINARY)
-        _, value_thresh_high = cv2.threshold(value, board_high[2], 255, cv2.THRESH_BINARY_INV)
-        value_thresh_combined = cv2.bitwise_and(value_thresh_low, value_thresh_high)
+        _, value_thresh_low = cv2.threshold(value, board_low[2], 255,
+                                            cv2.THRESH_BINARY)
+        _, value_thresh_high = cv2.threshold(value, board_high[2], 255,
+                                             cv2.THRESH_BINARY_INV)
+        value_thresh_combined = cv2.bitwise_and(value_thresh_low,
+                                                value_thresh_high)
 
-        img_result = cv2.bitwise_and(cv2.bitwise_and(hue_thresh_combined, saturation_thresh_combined), value_thresh_combined)
+        img_result = cv2.bitwise_and(hue_thresh_combined,
+                                     saturation_thresh_combined)
+        img_result = cv2.bitwise_and(img_result, value_thresh_combined)
 
         kernel = np.ones((3, 3), np.uint8)
         img_result = cv2.morphologyEx(img_result, cv2.MORPH_CLOSE, kernel)
         img_result = cv2.morphologyEx(img_result, cv2.MORPH_OPEN, kernel)
 
-        contours, hierachy = cv2.findContours(img_result, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)[-2:]
+        contours, hierachy = cv2.findContours(img_result, cv2.RETR_TREE,
+                                              cv2.CHAIN_APPROX_NONE)[-2:]
         if hierachy is None:
             continue
         for c, h in zip(contours, hierachy[0]):
@@ -267,9 +288,11 @@ def find_gameboard(stream):
                 hex_approx = approx_hexagon(approx)
 
                 M_actual = cv2.moments(c)
-                centroid_actual = [int(M_actual["m10"] / M_actual["m00"]), int(M_actual["m01"] / M_actual["m00"])]
+                centroid_actual = [int(M_actual["m10"] / M_actual["m00"]),
+                                   int(M_actual["m01"] / M_actual["m00"])]
                 M_hex = cv2.moments(approx)
-                centroid_hex = [int(M_hex["m10"] / M_hex["m00"]), int(M_hex["m01"] / M_hex["m00"])]
+                centroid_hex = [int(M_hex["m10"] / M_hex["m00"]),
+                                int(M_hex["m01"] / M_hex["m00"])]
                 distance = ((centroid_actual[0] - centroid_hex[0]) ** 2 + (centroid_actual[1] - centroid_hex[1]) ** 2) ** 0.5
                 if corners == 6 and hex_approx < 0.1 and distance < 5:
                     # cv2.drawContours(frame, [approx], -1, (10, 255, 0), 4)
@@ -286,7 +309,7 @@ def get_orthophoto(frame):
     for i, corner in enumerate(gameboard):
         hex[i] = corner[0]
     H, _ = cv2.findHomography(hex, game_model, cv2.RANSAC, 5.0)
-    return cv2.warpPerspective(frame, H, (500, 434))
+    return cv2.warpPerspective(frame, H, (ortho_width, ortho_height))
 
 
 def draw_gameboard(frame):
@@ -299,6 +322,44 @@ def get_frame(stream, frame_number):
     if frame_number % frame_rate == 0:
         _, frame = stream.retrieve()
     return frame
+
+
+def get_tile_coordinates():
+    '''Return the coordinates of the corners of all of the tiles
+
+       Should be of size n x 6 x 2 where the first dimension is the tiles,
+       the second dimension is the corners, and the third dimension is x, y
+
+       Order of the coords should be UL, UR, MR, LR, LL, ML'''
+    tile_count = 19
+    tile_coords = np.zeros((tile_count, 6, 2))
+    return tile_coords
+
+
+def get_search_area(tile):
+    padding = 0
+    start = tuple(tile[0] - padding)
+    end = tuple(tile[3] + padding)
+    return [start, end]
+
+
+def check_for_buildings(ortho, corners):
+    settlements = []
+    cities = []
+    for c in range(corners.shape[0]):
+        corner = corners[c]
+        padding = 3
+        slice = ortho[corner[1] - padding:corner[1] + padding,
+                      corner[0] - padding:corner[0] + padding]
+        # check avg color of slice to determine if their is a settlement/city
+        # settlement vs city will be difficult
+
+    return settlements, cities
+
+
+def determine_tile_number(tile):
+    '''Find a circular contour and feature match for number
+       TODO: use the thresh file to find how to thresh the circle out'''
 
 
 if __name__ == "__main__":
@@ -319,6 +380,29 @@ if __name__ == "__main__":
 
         ortho = get_orthophoto(frame)
         cv2.imshow('Ortho', ortho)
+
+        tiles = []
+
+        # shape of corner coordinates should be (19, 6, 2)
+        tile_coords = get_tile_coordinates()
+        for t in range(tile_coords.shape[0]):
+            # maybe make these points fit the ortho better with contours
+            tile_corners = tile_coords[t]
+
+            search = get_search_area(tile_corners)
+            slice = ortho[search[0][1]:search[1][1], search[0][0]:search[1][0]]
+
+            resource = determine_resource(slice, l2_thresh=5)
+
+            # check all corners for settlements and cities
+            settlements, cities = check_for_buildings(ortho)
+
+            tile_number = determine_tile_number(slice)
+
+            tile = Tile(tile_corners, slice, resource, settlements, cities,
+                        tile_number)
+
+            tiles.append(tile)
 
         # board = draw_gameboard(frame)
         # show_view(rgb=board)
