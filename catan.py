@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 import copy
 from tile import Tile
+import pickle
+import math
 
 
 surf = cv2.xfeatures2d.SURF_create(hessianThreshold=400, nOctaves=4,
@@ -9,13 +11,15 @@ surf = cv2.xfeatures2d.SURF_create(hessianThreshold=400, nOctaves=4,
                                    upright=False)
 
 resources = ['Lumber', 'Brick', 'Ore', 'Grain', 'Wool', 'Desert']
+resources_all = []
+resource_count = [4, 3, 3, 4, 4, 1]
 
-resource_images = []
+file = open('color_dict_rgb.pkl', 'rb')
+color_dict_rgb = pickle.load(file)
+file.close()
+
 resource_features = []
-for resource in resources:
-    resource_image = cv2.imread(f'{resource}.png')
-    resource_images.append(resource_image)
-    resource_features.append(surf.detectAndCompute(resource_image, None))
+
 
 resource_dict = {}
 for i, resource in enumerate(resources):
@@ -25,11 +29,12 @@ frame_rate = 5
 
 static_distributions = []
 
+# ip_stream_1 = '10.0.0.60'
 ip_stream_1 = '10.0.0.60'
 ip_stream_2 = '10.0.0.93'
 
 board_low = [80, 20, 100]
-board_high = [220, 255, 255]
+board_high = [150, 255, 255]
 dir = 1
 
 display_index = 0
@@ -39,13 +44,18 @@ gameboard = None
 model_coords = []
 
 ortho_width = 500
-ortho_height = int(0.867 * ortho_width)
-ortho_image_center = ortho_width // 2, ortho_height // 2
-print(ortho_image_center)
+ortho_height = int(0.87 * ortho_width)
+ortho_image_center = ortho_width // 2 + 12, ortho_height // 2
+# ortho_image_center = 21 / 2, 18.2 / 2
+
 
 game_model = np.float32([[5.75, 0], [16.25, 0], [21, 9.1], [16.25, 18.2],
                          [5.75, 18.2], [0, 9.1]])
 game_model = np.multiply(game_model, ortho_width/float(21))
+
+H = None
+
+center_tile_corners = np.load('center_tile_corners.npy', allow_pickle=True)
 
 
 # key codes:
@@ -98,6 +108,39 @@ def update_resource_templates(stream):
         key = cv2.waitKey(33)
 
 
+def live_update_resources(ortho):
+    local_resource_count = {}
+    for resource in resources:
+        local_resource_count[resource] = 0
+
+    tile_coords = get_tile_coordinates(1.8 * 500 / 21)
+
+    for t in range(tile_coords.shape[0]):
+        # maybe make these points fit the ortho better with contours
+
+        tile_corners = tile_coords[t]
+
+        search = get_search_area(tile_corners)
+        slice = ortho[search[0][1]:search[1][1], search[0][0]:search[1][0]]
+
+        zero_tile_corners = copy.copy(tile_corners)
+        for c in zero_tile_corners:
+            c[1] = c[1] - search[0][1]
+            c[0] = c[0] - search[0][0]
+
+        poly = np.zeros(slice.shape, dtype=np.uint8)
+        poly = cv2.fillConvexPoly(poly, zero_tile_corners.astype('int32'), (255, 255, 255))
+        slice = np.bitwise_and(poly, slice)
+
+        cv2.imshow("Slice", slice)
+        if cv2.waitKey(33) == 32:
+            exit()
+
+        resource_name = input('Enter resource name: ')
+        cv2.imwrite(f'resources/{resource_name}_{local_resource_count[resource_name]}.png', slice)
+        local_resource_count[resource_name] += 1
+
+
 def view_resource_templates():
     key = -1
     instructions = ('Press the following keys to view each specific resource '
@@ -130,10 +173,19 @@ def view_resource_templates():
         key = cv2.waitKey(33)
 
 
-def calculate_static_distributions():
+def calculate_all_static_distributions():
+    print('Calculating all static distributions')
     global static_distributions
+    global resource_features
     static_distributions = []
-    print('Generating static distributions')
+    for resource_name, count in zip(resources, resource_count):
+        for i in range(count):
+            resources_all.append(f'{resource_name}_{i}')
+
+    for resource in resources_all:
+        resource_image = cv2.imread(f'resources/{resource}.png')
+        resource_features.append(surf.detectAndCompute(resource_image, None))
+
     for features_main in resource_features:
         dists = []
         for features_other in resource_features:
@@ -156,6 +208,11 @@ def l2_norm(list_1, list_2):
     return sum((p-q)**2 for p, q in zip(list_1, list_2)) ** .5
 
 
+def l2_norm_color(list_1, list_2):
+    weights = [2, 1, 1]
+    return sum((w*(p-q))**2 for p, q, w in zip(list_1, list_2, weights)) ** .5
+
+
 def determine_resource(image, l2_thresh=0.5):
     dists = []
     for resource_feature in resource_features:
@@ -165,12 +222,14 @@ def determine_resource(image, l2_thresh=0.5):
     best_resource = None
     if sum(dists) != 0:
         dists = normalize(dists)
-        for resource_name, dist in zip(resources, static_distributions):
+        # print(dists)
+        for resource_name, dist in zip(resources_all, static_distributions):
             l2 = l2_norm(dists, dist)
             if l2 < l2_thresh:
                 l2_thresh = l2
-                best_resource = resource_name
+                best_resource = resource_name[:-2]
     return best_resource
+    # return resources[np.argmax(dists)]
 
 
 def open_stream(ip):
@@ -233,11 +292,13 @@ def show_view(rgb=None, hue=None, saturation=None, value=None):
     cv2.imshow('Display', to_display[display_index % len(to_display)])
 
 
-def find_gameboard(stream):
+def find_gameboard(stream, visualize=False):
+    print('Finding Gameboard')
     global gameboard
     confirmed = 0
     frame_number = 0
     approx = None
+    good_approx = None
     while confirmed < 5:
         stream.grab()
         frame_number += 1
@@ -295,20 +356,26 @@ def find_gameboard(stream):
                                 int(M_hex["m01"] / M_hex["m00"])]
                 distance = ((centroid_actual[0] - centroid_hex[0]) ** 2 + (centroid_actual[1] - centroid_hex[1]) ** 2) ** 0.5
                 if corners == 6 and hex_approx < 0.1 and distance < 5:
-                    # cv2.drawContours(frame, [approx], -1, (10, 255, 0), 4)
+                    good_approx = approx
+                    cv2.drawContours(frame, [approx], -1, (10, 255, 0), 4)
                     confirmed += 1
                 else:
-                    # cv2.drawContours(frame, [approx], -1, (0, 0, 255), 4)
+                    cv2.drawContours(frame, [approx], -1, (0, 0, 255), 4)
                     pass
+        if visualize:
+            show_view(rgb=frame)
+            if cv2.waitKey(33) == 27:
+                break
     print("Gameboard Identified")
-    gameboard = approx
+    gameboard = good_approx
 
 
 def get_orthophoto(frame):
+    global H
     hex = np.zeros((6, 2), dtype=np.float32)
     for i, corner in enumerate(gameboard):
         hex[i] = corner[0]
-    H, _ = cv2.findHomography(hex, game_model, cv2.RANSAC, 5.0)
+    H, _ = cv2.findHomography(hex, game_model)
     return cv2.warpPerspective(frame, H, (ortho_width, ortho_height))
 
 
@@ -328,20 +395,25 @@ def get_tile_coordinates(tile_width):
     '''Return the coordinates of the corners of all of the tiles
 
        Should be of size n x 6 x 2 where the first dimension is the tiles,
-       the second dimension is the corners, and the third dimension is x, y
-
-       Order of the coords should be UL, UR, MR, LR, LL, ML'''
+       the second dimension is the corners, and the third dimension is x, y'''
     tile_count = 19
     tile_coords = np.zeros((tile_count, 6, 2))
 
-    center = (0, 0) + ortho_image_center
-
+    center = ortho_image_center
+    i = 0
     tiles = {}
     tiles[center] = corners_from_center(center, tile_width)
-    for first_surround in surrounding_tiles(center, tile_width):
+    first_surrounds = surrounding_tiles(center, tile_width)
+    for first_surround in first_surrounds:
         tiles[first_surround] = corners_from_center(first_surround, tile_width)
+    for first_surround in first_surrounds:
         for second_surround in surrounding_tiles(first_surround, tile_width):
-            if second_surround in tiles.keys():
+            already_present = False
+            for prev in tiles.keys():
+                if l2_norm(second_surround, prev) < tile_width/10:
+                    already_present = True
+                    break
+            if already_present:
                 continue
             tiles[second_surround] = corners_from_center(second_surround,
                                                          tile_width)
@@ -350,11 +422,9 @@ def get_tile_coordinates(tile_width):
 
     for i, tile in enumerate(tiles.keys()):
         for j, point in enumerate(tiles[tile]):
-            for k, coord in enumerate(point):
-                tile_coords[i, j, k] = coord
+            tile_coords[i, j, :] = point
 
-
-    return tile_coords
+    return tile_coords.astype(np.uint16)
 
 
 def corners_from_center(center, tile_width=1):
@@ -376,7 +446,11 @@ def corners_from_center(center, tile_width=1):
     points.append((0.0, vertical))
     points.append((-1 * horizontal, half_vertical))
 
-    return list(filter(lambda p: round(p + center), points))
+    offset_points = []
+    for p in points:
+        offset_points.append((p[0] + center[0], p[1] + center[1]))
+
+    return offset_points
 
 
 def surrounding_tiles(center, tile_width=1):
@@ -396,42 +470,139 @@ def surrounding_tiles(center, tile_width=1):
     points.append((-1 * half_horizontal, vertical))
     points.append((-1 * horizontal, 0.0))
 
-    return list(filter(lambda p: round(p + center), points))
+    offset_points = []
+    for p in points:
+        offset_points.append((p[0] + center[0], p[1] + center[1]))
+
+    return offset_points
 
 
 def get_search_area(tile):
-    padding = 0
-    start = tuple(tile[0] - padding)
-    end = tuple(tile[3] + padding)
+    padding = 10
+    start = tuple(np.amin(tile, axis=0) - padding)
+    end = tuple(np.amax(tile, axis=0) + padding)
     return [start, end]
 
 
-def check_for_buildings(ortho, corners):
+def get_average_color(image, loc, radius, visualize=False):
+    slice = image[loc[1] - radius:loc[1] + radius,
+                  loc[0] - radius:loc[0] + radius]
+    poly = np.zeros(slice.shape, dtype=np.uint8)
+    poly = cv2.circle(poly, (radius, radius), radius, (255, 255, 255), -1)
+    image_color = cv2.mean(slice, cv2.cvtColor(poly, cv2.COLOR_BGR2GRAY))
+    max_i = max(image_color)
+    image_color = [c for c in map(lambda i: i / max_i, image_color)][:3]
+    if visualize:
+        slice = np.bitwise_and(poly, slice)
+        cv2.imshow('Average Color', slice)
+        print(f'Average color is {image_color}')
+        while cv2.waitKey(33) != 32:
+            pass
+    return image_color
+
+
+def check_for_buildings(ortho, corners, visualize=False):
     settlements = []
     cities = []
-    for c in range(corners.shape[0]):
-        corner = corners[c]
+    for corner in corners:
         padding = 3
-        slice = ortho[corner[1] - padding:corner[1] + padding,
-                      corner[0] - padding:corner[0] + padding]
+        image_color = get_average_color(ortho, corner, padding, visualize)
+        best_color = get_building_color(image_color)
+        if visualize:
+            print(best_color)
+        settlements.append(best_color)
         # check avg color of slice to determine if their is a settlement/city
         # settlement vs city will be difficult
-
     return settlements, cities
+
+
+def get_building_color(image_color):
+    best_l2 = 1000
+    best_color = None
+    for color_name in color_dict_rgb.keys():
+        l2 = l2_norm(image_color, color_dict_rgb[color_name])
+        if l2 < best_l2:
+            best_l2 = l2
+            best_color = color_name
+    return best_color
+
+
+def calibrate_colors(stream, visualize=False):
+    print('Calibrating colors')
+    global color_dict_rgb
+    frame_number = 0
+    for color_name in color_dict_rgb.keys():
+        print(f'Place six {color_name} buildings around the center tile and press SPACE')
+        corners = []
+        while cv2.waitKey(33) != 32:
+            frame = get_frame(stream, frame_number)
+            frame_number += 1
+            if frame is None:
+                continue
+            ortho = get_orthophoto(frame)
+            cv2.imshow('Color Calibration', ortho)
+        for corner in center_tile_corners:
+            corners.append(get_average_color(ortho, corner, 5, visualize))
+        corners = np.array(corners)
+        average = list(np.average(corners, axis=0))
+        print('Average:', average)
+        color_dict_rgb[color_name] = average
+    f = open('color_dict_rgb.pkl', 'wb')
+    pickle.dump(color_dict_rgb, f)
+    f.close()
 
 
 def determine_tile_number(tile):
     '''Find a circular contour and feature match for number
        TODO: use the thresh file to find how to thresh the circle out'''
+    image_HSV = cv2.cvtColor(tile, cv2.COLOR_BGR2HSV)
+    hue, saturation, value = list(cv2.split(image_HSV))
+
+    _, hue_thresh_low = cv2.threshold(hue, 0, 255, cv2.THRESH_BINARY)
+    _, hue_thresh_high = cv2.threshold(hue, 55, 255, cv2.THRESH_BINARY_INV)
+    hue_thresh_combined = cv2.bitwise_and(hue_thresh_low, hue_thresh_high)
+    cv2.imshow("hue", hue_thresh_combined)
+
+    _, saturation_thresh_low = cv2.threshold(saturation, 0, 255, cv2.THRESH_BINARY)
+    _, saturation_thresh_high = cv2.threshold(saturation, 100, 255, cv2.THRESH_BINARY_INV)
+    saturation_thresh_combined = cv2.bitwise_and(saturation_thresh_low, saturation_thresh_high)
+    cv2.imshow("saturation", saturation_thresh_combined)
+
+    _, value_thresh_low = cv2.threshold(value, 210, 255, cv2.THRESH_BINARY)
+    _, value_thresh_high = cv2.threshold(value, 255, 255, cv2.THRESH_BINARY_INV)
+    value_thresh_combined = cv2.bitwise_and(value_thresh_low, value_thresh_high)
+    cv2.imshow("value", value_thresh_combined)
+
+    img_result = cv2.bitwise_and(cv2.bitwise_and(hue_thresh_combined, saturation_thresh_combined), value_thresh_combined)
+
+    # kernel = np.ones((7, 7), np.uint8)
+    # img_result_close = cv2.morphologyEx(img_result, cv2.MORPH_CLOSE, kernel)
+
+    contours, hierachy = cv2.findContours(img_result, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)[-2:]
+
+    for c in contours:
+        perimeter = cv2.arcLength(c, True)
+        area = cv2.contourArea(c)
+        if perimeter == 0:
+            break
+        circularity = 4*math.pi*(area/(perimeter*perimeter))
+        if circularity > 0.8:
+            cv2.drawContours(slice, c, -1, (0, 140, 255), 2)
+    cv2.imshow('Finding Tile', slice)
+    while cv2.waitKey(33) != 32:
+        pass
 
 
 if __name__ == "__main__":
     frame_number = 0
 
+    print("Generating Tile Coordinates")
     stream = open_stream(ip_stream_1)
-    calculate_static_distributions()
+
+    calculate_all_static_distributions()
     if gameboard is None:
         find_gameboard(stream)
+    # calibrate_colors(stream, True)
 
     while True:
         key = cv2.waitKey(33)
@@ -444,21 +615,39 @@ if __name__ == "__main__":
         ortho = get_orthophoto(frame)
         cv2.imshow('Ortho', ortho)
 
+        # live_update_resources(ortho)
+
         tiles = []
 
         # shape of corner coordinates should be (19, 6, 2)
-        tile_coords = get_tile_coordinates()
+        tile_coords = get_tile_coordinates(1.8 * 500 / 21)
+
         for t in range(tile_coords.shape[0]):
             # maybe make these points fit the ortho better with contours
+
             tile_corners = tile_coords[t]
 
             search = get_search_area(tile_corners)
             slice = ortho[search[0][1]:search[1][1], search[0][0]:search[1][0]]
 
-            resource = determine_resource(slice, l2_thresh=5)
+            zero_tile_corners = copy.copy(tile_corners)
+            for c in zero_tile_corners:
+                c[1] = c[1] - search[0][1]
+                c[0] = c[0] - search[0][0]
+
+            poly = np.zeros(slice.shape, dtype=np.uint8)
+            poly = cv2.fillConvexPoly(poly, zero_tile_corners.astype('int32'), (255, 255, 255))
+            slice = np.bitwise_and(poly, slice)
+            cv2.imshow("Slice", slice)
+            resource = determine_resource(slice, l2_thresh=.5)
 
             # check all corners for settlements and cities
-            settlements, cities = check_for_buildings(ortho)
+            settlements, cities = check_for_buildings(ortho, tile_corners)
+            print(f'Resource: {resource}')
+            print(f'Settlements: {settlements}')
+            print(f'Cities: {cities}')
+            while cv2.waitKey(33) != 32:
+                pass
 
             tile_number = determine_tile_number(slice)
 
@@ -466,6 +655,10 @@ if __name__ == "__main__":
                         tile_number)
 
             tiles.append(tile)
+        ortho[ortho_image_center[1]][ortho_image_center[0]] = [0, 0, 255]
+        cv2.imshow('Ortho', ortho)
+        # while cv2.waitKey(33) != 32:
+        #     pass
 
         # board = draw_gameboard(frame)
         # show_view(rgb=board)
