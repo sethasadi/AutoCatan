@@ -11,7 +11,12 @@ class Tile:
         self.tile_number = tile_number
         self.tile_ortho = tile_ortho
 
-    def disperse(self):
+    def disperse(self, num):
         '''Go through cities and settlements and disperse this resource
         to them
         '''
+        to_disperse = []
+        if num == self.tile_number:
+            for s in self.settlements:
+                to_disperse.append((s, self.resource))
+        return to_disperse
