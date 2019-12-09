@@ -1,9 +1,7 @@
-import numpy as np
-
-
 class Tile:
     def __init__(self, corner_points, tile_ortho, resource, settlements,
                  cities, tile_number):
+
         self.resource = resource
         self.corner_points = corner_points
         self.settlements = settlements
@@ -19,4 +17,6 @@ class Tile:
         if num == self.tile_number:
             for s in self.settlements:
                 to_disperse.append((s, self.resource))
+            for c in self.cities:
+                to_disperse.append((c, self.resource))
         return to_disperse
